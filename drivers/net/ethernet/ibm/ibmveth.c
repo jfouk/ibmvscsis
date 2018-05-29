@@ -56,6 +56,7 @@ static void ibmveth_rxq_harvest_buffer(struct ibmveth_adapter *adapter);
 static unsigned long ibmveth_get_desired_dma(struct vio_dev *vdev);
 
 static struct kobj_type ktype_veth_pool;
+static struct kobj_type ktype_veth_trunk;
 
 
 static const char ibmveth_driver_name[] = "ibmveth";
@@ -625,6 +626,20 @@ static int ibmveth_open(struct net_device *netdev)
 	netdev_dbg(netdev, "receive q   @ 0x%p\n", adapter->rx_queue.queue_addr);
 
 	h_vio_signal(adapter->vdev->unit_address, VIO_IRQ_DISABLE);
+
+	if (vio_get_attribute(adapter->vdev, "ibm,trunk-adapter", NULL) != NULL) {
+		long ret;
+		ret = h_vioctl(adapter->vdev->unit_address,
+						 IBMVETH_VIOCTL_DISABLE_INACTIVE_TRUNK_RECEPTION,
+						 0, 0, 0);
+		if (ret != H_SUCCESS) {
+			netdev_err(netdev, "unable to disable trunk inactive reception."
+							   " rc=%ld\n",
+					   ret);
+			rc = -EIO;
+            goto err_out;
+		}
+	}
 
 	lpar_rc = ibmveth_register_logical_lan(adapter, rxq_desc, mac_address);
 
@@ -1717,6 +1732,15 @@ static int ibmveth_probe(struct vio_dev *dev, const struct vio_device_id *id)
 			kobject_uevent(kobj, KOBJ_ADD);
 	}
 
+	if (vio_get_attribute(dev, "ibm,trunk-adapter", NULL) != NULL) {
+		struct kobject *kobj = &adapter->trunk_kobj;
+		int ret;
+		ret = kobject_init_and_add(kobj, &ktype_veth_trunk,
+								   &dev->dev.kobj, "trunk");
+		if (!ret)
+			kobject_uevent(kobj, KOBJ_ADD);
+	}
+
 	netdev_dbg(netdev, "adapter @ 0x%p\n", adapter);
 
 	adapter->buffer_list_dma = DMA_ERROR_CODE;
@@ -1748,6 +1772,10 @@ static int ibmveth_remove(struct vio_dev *dev)
 
 	for (i = 0; i < IBMVETH_NUM_BUFF_POOLS; i++)
 		kobject_put(&adapter->rx_buff_pool[i].kobj);
+
+	if (vio_get_attribute(dev, "ibm,trunk-adapter", NULL) != NULL) {
+		kobject_put(&adapter->trunk_kobj);
+	}
 
 	unregister_netdev(netdev);
 
@@ -1872,6 +1900,55 @@ static ssize_t veth_pool_store(struct kobject *kobj, struct attribute *attr,
 	return count;
 }
 
+static ssize_t veth_trunk_show(struct kobject *kobj,
+			      struct attribute *attr, char *buf)
+{
+	struct net_device *netdev = dev_get_drvdata(
+	    container_of(kobj->parent, struct device, kobj));
+	struct ibmveth_adapter *adapter = netdev_priv(netdev);
+	unsigned long ret_attr;
+	long ret;
+
+	ret = h_illan_attributes(adapter->vdev->unit_address, 0, 0, &ret_attr);
+
+	if (ret == H_SUCCESS) {
+		unsigned int is_active = ret_attr & IBMVETH_ILLAN_ACTIVE_TRUNK;
+		adapter->is_active_trunk = is_active;
+		return sprintf(buf, "%u\n", is_active);
+	}
+	return 0;
+}
+
+static ssize_t veth_trunk_store(struct kobject *kobj, struct attribute *attr,
+			       const char *buf, size_t count)
+{
+	struct net_device *netdev = dev_get_drvdata(
+	    container_of(kobj->parent, struct device, kobj));
+	struct ibmveth_adapter *adapter = netdev_priv(netdev);
+	long value = simple_strtol(buf, NULL, 10);
+	unsigned long ret_attr;
+	long ret;
+
+	if (attr == &veth_active_attr) {
+		ret = h_illan_attributes(adapter->vdev->unit_address, 0, 0, &ret_attr);
+		if (ret == H_SUCCESS) {
+			if (value && !(ret_attr & IBMVETH_ILLAN_ACTIVE_TRUNK)) {
+				ret = h_illan_attributes(adapter->vdev->unit_address, 0,
+								 IBMVETH_ILLAN_ACTIVE_TRUNK, &ret_attr);
+				if (ret == H_SUCCESS) {
+					adapter->is_active_trunk = true;
+					netdev_info(netdev, "trunk adapter became active.\n");
+				} else {
+					netdev_err(netdev, "unable to activate trunk adapter. rc=%ld\n", ret);
+				}
+			} else if (!value) {
+				netdev_err(netdev, "disabling trunk adapter is not allowed.\n");
+				return -EPERM;
+			}
+		}
+	}
+	return count;
+}
 
 #define ATTR(_name, _mode)				\
 	struct attribute veth_##_name##_attr = {	\
@@ -1898,6 +1975,22 @@ static struct kobj_type ktype_veth_pool = {
 	.release        = NULL,
 	.sysfs_ops      = &veth_pool_ops,
 	.default_attrs  = veth_pool_attrs,
+};
+
+static struct attribute *veth_trunk_attrs[] = {
+	&veth_active_attr,
+	NULL,
+};
+
+static const struct sysfs_ops veth_trunk_ops = {
+	.show   = veth_trunk_show,
+	.store  = veth_trunk_store,
+};
+
+static struct kobj_type ktype_veth_trunk = {
+	.release        = NULL,
+	.sysfs_ops      = &veth_trunk_ops,
+	.default_attrs  = veth_trunk_attrs,
 };
 
 static int ibmveth_resume(struct device *dev)

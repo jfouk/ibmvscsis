@@ -48,6 +48,8 @@
 #define IBMVETH_ILLAN_IPV4_TCP_CSUM		0x0000000000000002UL
 #define IBMVETH_ILLAN_ACTIVE_TRUNK		0x0000000000000001UL
 
+#define IBMVETH_VIOCTL_DISABLE_INACTIVE_TRUNK_RECEPTION		0x13UL
+
 /* hcall macros */
 #define h_register_logical_lan(ua, buflst, rxq, fltlst, mac) \
   plpar_hcall_norets(H_REGISTER_LOGICAL_LAN, ua, buflst, rxq, fltlst, mac)
@@ -94,6 +96,14 @@ static inline long h_illan_attributes(unsigned long unit_address,
 	*ret_attributes = retbuf[0];
 
 	return rc;
+}
+
+static inline long h_vioctl(unsigned long unit_address,
+				      unsigned long subfunction, unsigned long param1,
+				      unsigned long param2, unsigned long param3)
+{
+	return plpar_hcall_norets(H_VIOCTL, unit_address, subfunction,
+							  param1, param2, param3);
 }
 
 #define h_multicast_ctrl(ua, cmd, mac) \
@@ -147,6 +157,7 @@ struct ibmveth_adapter {
     struct net_device *netdev;
     struct napi_struct napi;
     struct net_device_stats stats;
+    struct kobject trunk_kobj;
     unsigned int mcastFilterSize;
     void * buffer_list_addr;
     void * filter_list_addr;
