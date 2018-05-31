@@ -1013,6 +1013,7 @@ static int ibmveth_send(struct ibmveth_adapter *adapter,
 	unsigned long correlator;
 	unsigned int retry_count;
 	unsigned long ret;
+	unsigned long ret_attr;
 
 	/*
 	 * The retry count sets a maximum for the number of broadcast and
@@ -1029,10 +1030,23 @@ static int ibmveth_send(struct ibmveth_adapter *adapter,
 					     adapter->fw_large_send_support);
 	} while ((ret == H_BUSY) && (retry_count--));
 
-	if (ret != H_SUCCESS && ret != H_DROPPED) {
-		netdev_err(adapter->netdev, "tx: h_send_logical_lan failed "
-			   "with rc=%ld\n", ret);
-		return 1;
+	if (ret != H_SUCCESS && ret != H_DROPPED ) {
+
+        if ( adapter->is_active_trunk ) {
+
+            ret = h_illan_attributes(adapter->vdev->unit_address, 0, 0, &ret_attr);
+            // check that we are still the active trunk
+            if (ret == H_SUCCESS && (ret_attr & IBMVETH_ILLAN_ACTIVE_TRUNK)) {
+                netdev_err(adapter->netdev, "tx: h_send_logical_lan failed "
+                           "with rc=%ld\n", ret);
+            }
+            else{
+                adapter->is_active_trunk = false;
+                netdev_info(adapter->netdev, "trunk adapter is no longer active.\n");
+            }
+        }
+
+        return 1;
 	}
 
 	return 0;
@@ -1732,11 +1746,14 @@ static int ibmveth_probe(struct vio_dev *dev, const struct vio_device_id *id)
 			kobject_uevent(kobj, KOBJ_ADD);
 	}
 
+    // initialize to not trunk adapter, then check if we are
+    adapter->is_trunk_adapter=false;
 	if (vio_get_attribute(dev, "ibm,trunk-adapter", NULL) != NULL) {
 		struct kobject *kobj = &adapter->trunk_kobj;
 		int ret;
 		ret = kobject_init_and_add(kobj, &ktype_veth_trunk,
 								   &dev->dev.kobj, "trunk");
+        adapter->is_trunk_adapter = true;
 		if (!ret)
 			kobject_uevent(kobj, KOBJ_ADD);
 	}

@@ -169,6 +169,7 @@ struct ibmveth_adapter {
     int rx_csum;
     int large_send;
     bool is_active_trunk;
+    bool is_trunk_adapter;
     void *bounce_buffer;
     dma_addr_t bounce_buffer_dma;
 
